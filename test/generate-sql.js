@@ -21,28 +21,35 @@ function generateMetrics(baseTimestamp, serverIdx, hourOffset) {
   const ramNoise = (Math.random() - 0.5) * 10;
   const pingNoise = (Math.random() - 0.5) * 15;
   
+  const cpu = Math.max(5, Math.min(95, baseline.cpu * timeFactor + cpuNoise));
+  const ram = Math.max(10, Math.min(90, baseline.ram * timeFactor + ramNoise));
+  const ramTotal = serverIdx === 0 ? 32768 : 16384;
+  const ramUsed = ramTotal * (ram / 100);
+  
   return {
-    cpu: Math.max(5, Math.min(95, baseline.cpu * timeFactor + cpuNoise)),
-    ram: Math.max(10, Math.min(90, baseline.ram * timeFactor + ramNoise)),
-    disk: 45 + (Math.random() - 0.5) * 5,
-    load_avg: (baseline.load + (Math.random() - 0.5) * 0.8).toFixed(2),
-    net_in_speed: Math.random() * 80 + 20,
-    net_out_speed: Math.random() * 40 + 10,
-    net_rx: Math.random() * 10000 + 5000,
-    net_tx: Math.random() * 5000 + 2500,
-    processes: 100 + Math.floor(Math.random() * 50),
-    tcp_conn: 50 + Math.floor(Math.random() * 100),
-    udp_conn: 10 + Math.floor(Math.random() * 30),
-    ping_ct: Math.round(Math.max(10, baseline.ping * 1.2 + pingNoise)),
-    ping_cu: Math.round(Math.max(10, baseline.ping + pingNoise)),
-    ping_cm: Math.round(Math.max(10, baseline.ping * 1.1 + pingNoise)),
-    ping_bd: Math.round(Math.max(10, baseline.ping * 1.5 + pingNoise)),
-    ram_total: serverIdx === 0 ? 32768 : 16384,
-    ram_used: (serverIdx === 0 ? 32768 : 16384) * ((baseline.ram * timeFactor + ramNoise) / 100),
-    swap_total: 8192,
-    swap_used: Math.random() * 512,
-    disk_total: serverIdx === 0 ? 200 : 100,
-    disk_used: 90
+    cpu: cpu.toFixed(2),
+    ram: ram.toFixed(2),
+    ram_total: ramTotal.toString(),
+    ram_used: Math.floor(ramUsed).toString(),
+    swap_total: '8192',
+    swap_used: Math.floor(Math.random() * 512).toString(),
+    disk: (45 + (Math.random() - 0.5) * 5).toFixed(0),
+    disk_total: (serverIdx === 0 ? 200 : 100).toString(),
+    disk_used: '90',
+    load: `${(baseline.load + (Math.random() - 0.5) * 0.8).toFixed(2)} ${(baseline.load + (Math.random() - 0.5) * 0.6).toFixed(2)} ${(baseline.load + (Math.random() - 0.5) * 0.4).toFixed(2)}`,
+    net_rx: Math.floor(Math.random() * 10000 + 5000).toString(),
+    net_tx: Math.floor(Math.random() * 5000 + 2500).toString(),
+    net_in_speed: Math.floor(Math.random() * 80 + 20).toString(),
+    net_out_speed: Math.floor(Math.random() * 40 + 10).toString(),
+    processes: (100 + Math.floor(Math.random() * 50)).toString(),
+    tcp_conn: (50 + Math.floor(Math.random() * 100)).toString(),
+    udp_conn: (10 + Math.floor(Math.random() * 30)).toString(),
+    ping_ct: Math.round(Math.max(10, baseline.ping * 1.2 + pingNoise)).toString(),
+    ping_cu: Math.round(Math.max(10, baseline.ping + pingNoise)).toString(),
+    ping_cm: Math.round(Math.max(10, baseline.ping * 1.1 + pingNoise)).toString(),
+    ping_bd: Math.round(Math.max(10, baseline.ping * 1.5 + pingNoise)).toString(),
+    ip_v4: '1',
+    ip_v6: serverIdx === 0 ? '1' : '0'
   };
 }
 
@@ -160,14 +167,14 @@ for (let s = 0; s < servers.length; s++) {
       disk_total, disk_used
     ) VALUES (
       '${server.id}', ${ts}, 
-      ${metrics.cpu}, ${metrics.ram}, ${metrics.disk}, '${metrics.load_avg}',
-      ${metrics.net_in_speed}, ${metrics.net_out_speed},
-      ${metrics.net_rx}, ${metrics.net_tx},
-      ${metrics.processes}, ${metrics.tcp_conn}, ${metrics.udp_conn},
-      ${metrics.ping_ct}, ${metrics.ping_cu}, ${metrics.ping_cm}, ${metrics.ping_bd},
-      ${metrics.ram_total}, ${metrics.ram_used},
-      ${metrics.swap_total}, ${metrics.swap_used},
-      ${metrics.disk_total}, ${metrics.disk_used}
+      ${parseFloat(metrics.cpu)}, ${parseFloat(metrics.ram)}, ${parseFloat(metrics.disk)}, '${metrics.load}',
+      ${parseFloat(metrics.net_in_speed)}, ${parseFloat(metrics.net_out_speed)},
+      ${parseFloat(metrics.net_rx)}, ${parseFloat(metrics.net_tx)},
+      ${parseInt(metrics.processes)}, ${parseInt(metrics.tcp_conn)}, ${parseInt(metrics.udp_conn)},
+      ${parseInt(metrics.ping_ct)}, ${parseInt(metrics.ping_cu)}, ${parseInt(metrics.ping_cm)}, ${parseInt(metrics.ping_bd)},
+      ${parseFloat(metrics.ram_total)}, ${parseFloat(metrics.ram_used)},
+      ${parseFloat(metrics.swap_total)}, ${parseFloat(metrics.swap_used)},
+      ${parseFloat(metrics.disk_total)}, ${parseFloat(metrics.disk_used)}
     );\n`;
     
     if (ts > latestTs) {
@@ -186,26 +193,28 @@ for (const [serverId, data] of Object.entries(serverLatestMetrics)) {
   const uptime = Math.floor((now - servers.find(s => s.id === serverId).boot_time) / 1000);
   
   sql += `UPDATE servers 
-    SET cpu = '${metrics.cpu.toFixed(1)}', 
-        ram = '${metrics.ram.toFixed(1)}', 
-        disk = '${metrics.disk.toFixed(1)}', 
-        load_avg = '${metrics.load_avg}', 
-        net_in_speed = '${metrics.net_in_speed.toFixed(0)}', 
-        net_out_speed = '${metrics.net_out_speed.toFixed(0)}',
-        net_rx = '${metrics.net_rx.toFixed(0)}', 
-        net_tx = '${metrics.net_tx.toFixed(0)}',
+    SET cpu = '${metrics.cpu}', 
+        ram = '${metrics.ram}', 
+        disk = '${metrics.disk}', 
+        load_avg = '${metrics.load}', 
+        net_in_speed = '${metrics.net_in_speed}', 
+        net_out_speed = '${metrics.net_out_speed}',
+        net_rx = '${metrics.net_rx}', 
+        net_tx = '${metrics.net_tx}',
         processes = '${metrics.processes}', 
         tcp_conn = '${metrics.tcp_conn}', 
         udp_conn = '${metrics.udp_conn}',
-        ping_ct = '${metrics.ping_ct.toFixed(0)}', 
-        ping_cu = '${metrics.ping_cu.toFixed(0)}', 
-        ping_cm = '${metrics.ping_cm.toFixed(0)}', 
-        ping_bd = '${metrics.ping_bd.toFixed(0)}',
-        ram_used = '${metrics.ram_used.toFixed(0)}', 
-        swap_used = '${metrics.swap_used.toFixed(0)}', 
+        ping_ct = '${metrics.ping_ct}', 
+        ping_cu = '${metrics.ping_cu}', 
+        ping_cm = '${metrics.ping_cm}', 
+        ping_bd = '${metrics.ping_bd}',
+        ram_used = '${metrics.ram_used}', 
+        swap_used = '${metrics.swap_used}', 
         disk_used = '${metrics.disk_used}',
         last_updated = ${ts}, 
-        uptime = '${uptime}'
+        uptime = '${uptime}',
+        ip_v4 = '${metrics.ip_v4}',
+        ip_v6 = '${metrics.ip_v6}'
     WHERE id = '${serverId}';\n`;
 }
 

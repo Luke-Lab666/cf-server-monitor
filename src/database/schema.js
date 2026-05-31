@@ -100,7 +100,7 @@ export async function initDatabase(db) {
         ram_max REAL DEFAULT 0,
         disk_avg REAL DEFAULT 0,
         disk_max REAL DEFAULT 0,
-        load_avg_avg REAL DEFAULT 0,
+        load_avg_avg TEXT DEFAULT '0',
         net_in_speed_avg REAL DEFAULT 0,
         net_out_speed_avg REAL DEFAULT 0,
         net_rx_avg REAL DEFAULT 0,
@@ -154,6 +154,82 @@ export async function initDatabase(db) {
     for (const [colName, colDef] of Object.entries(newCols)) {
       if (!existingCols.includes(colName)) {
         await db.prepare(`ALTER TABLE servers ADD COLUMN ${colName} ${colDef}`).run();
+      }
+    }
+
+    // 检查并修改 metrics_aggregated 表的 load_avg_avg 列类型
+    const { results: aggColumns } = await db.prepare(`PRAGMA table_info(metrics_aggregated)`).all();
+    const loadAvgAvgCol = aggColumns.find(c => c.name === 'load_avg_avg');
+    if (loadAvgAvgCol && loadAvgAvgCol.type !== 'TEXT') {
+      // SQLite 不支持直接修改列类型，需要重建表
+      try {
+        // 创建临时表
+        await db.prepare(`
+          CREATE TABLE metrics_aggregated_temp (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id TEXT NOT NULL,
+            bucket INTEGER NOT NULL,
+            bucket_size INTEGER NOT NULL,
+            cpu_avg REAL DEFAULT 0,
+            cpu_max REAL DEFAULT 0,
+            ram_avg REAL DEFAULT 0,
+            ram_max REAL DEFAULT 0,
+            disk_avg REAL DEFAULT 0,
+            disk_max REAL DEFAULT 0,
+            load_avg_avg TEXT DEFAULT '0',
+            net_in_speed_avg REAL DEFAULT 0,
+            net_out_speed_avg REAL DEFAULT 0,
+            net_rx_avg REAL DEFAULT 0,
+            net_tx_avg REAL DEFAULT 0,
+            processes_avg REAL DEFAULT 0,
+            tcp_conn_avg REAL DEFAULT 0,
+            udp_conn_avg REAL DEFAULT 0,
+            ping_ct_avg REAL DEFAULT 0,
+            ping_cu_avg REAL DEFAULT 0,
+            ping_cm_avg REAL DEFAULT 0,
+            ping_bd_avg REAL DEFAULT 0,
+            ram_total_avg REAL DEFAULT 0,
+            ram_used_avg REAL DEFAULT 0,
+            swap_total_avg REAL DEFAULT 0,
+            swap_used_avg REAL DEFAULT 0,
+            disk_total_avg REAL DEFAULT 0,
+            disk_used_avg REAL DEFAULT 0,
+            FOREIGN KEY (server_id) REFERENCES servers(id),
+            UNIQUE(server_id, bucket, bucket_size)
+          )
+        `).run();
+        
+        // 复制数据
+        await db.prepare(`
+          INSERT INTO metrics_aggregated_temp (
+            id, server_id, bucket, bucket_size,
+            cpu_avg, cpu_max, ram_avg, ram_max, disk_avg, disk_max,
+            load_avg_avg, net_in_speed_avg, net_out_speed_avg,
+            net_rx_avg, net_tx_avg, processes_avg, tcp_conn_avg, udp_conn_avg,
+            ping_ct_avg, ping_cu_avg, ping_cm_avg, ping_bd_avg,
+            ram_total_avg, ram_used_avg, swap_total_avg, swap_used_avg,
+            disk_total_avg, disk_used_avg
+          )
+          SELECT 
+            id, server_id, bucket, bucket_size,
+            cpu_avg, cpu_max, ram_avg, ram_max, disk_avg, disk_max,
+            CAST(load_avg_avg AS TEXT), net_in_speed_avg, net_out_speed_avg,
+            net_rx_avg, net_tx_avg, processes_avg, tcp_conn_avg, udp_conn_avg,
+            ping_ct_avg, ping_cu_avg, ping_cm_avg, ping_bd_avg,
+            ram_total_avg, ram_used_avg, swap_total_avg, swap_used_avg,
+            disk_total_avg, disk_used_avg
+          FROM metrics_aggregated
+        `).run();
+        
+        // 删除旧表
+        await db.prepare(`DROP TABLE metrics_aggregated`).run();
+        
+        // 重命名临时表
+        await db.prepare(`ALTER TABLE metrics_aggregated_temp RENAME TO metrics_aggregated`).run();
+        
+        console.log('✅ 已成功修改 metrics_aggregated 表的 load_avg_avg 列为 TEXT 类型');
+      } catch (e) {
+        console.error('修改 metrics_aggregated 表失败:', e);
       }
     }
 
@@ -245,7 +321,53 @@ async function aggregateFromRaw(db, startTime, endTime, bucketSeconds, phaseName
     return { aggregated: 0, deleted: 0, rawCount: 0 };
   }
   
-  const aggregateResult = await db.prepare(`
+  // 先获取聚合数据（不含 load_avg）
+  const aggData = await db.prepare(`
+    SELECT 
+      server_id,
+      CAST((timestamp + ? / 2) / ? AS INTEGER) * ? AS bucket,
+      ROUND(AVG(cpu), 2) AS cpu_avg, MAX(cpu) AS cpu_max,
+      ROUND(AVG(ram), 2) AS ram_avg, MAX(ram) AS ram_max,
+      ROUND(AVG(disk), 2) AS disk_avg, MAX(disk) AS disk_max,
+      ROUND(AVG(net_in_speed), 2) AS net_in_speed_avg, ROUND(AVG(net_out_speed), 2) AS net_out_speed_avg,
+      ROUND(AVG(net_rx), 2) AS net_rx_avg, ROUND(AVG(net_tx), 2) AS net_tx_avg,
+      ROUND(AVG(processes), 2) AS processes_avg, ROUND(AVG(tcp_conn), 2) AS tcp_conn_avg, ROUND(AVG(udp_conn), 2) AS udp_conn_avg,
+      ROUND(AVG(ping_ct), 2) AS ping_ct_avg, ROUND(AVG(ping_cu), 2) AS ping_cu_avg, ROUND(AVG(ping_cm), 2) AS ping_cm_avg, ROUND(AVG(ping_bd), 2) AS ping_bd_avg,
+      ROUND(AVG(ram_total), 2) AS ram_total_avg, ROUND(AVG(ram_used), 2) AS ram_used_avg,
+      ROUND(AVG(swap_total), 2) AS swap_total_avg, ROUND(AVG(swap_used), 2) AS swap_used_avg,
+      ROUND(AVG(disk_total), 2) AS disk_total_avg, ROUND(AVG(disk_used), 2) AS disk_used_avg
+    FROM metrics_history
+    WHERE typeof(timestamp) = 'integer'
+      AND timestamp >= ?
+      AND timestamp < ?
+    GROUP BY server_id, CAST((timestamp + ? / 2) / ? AS INTEGER)
+  `).bind(
+    bucketMs, bucketMs, bucketMs,
+    startTime, endTime, bucketMs, bucketMs
+  ).all();
+  
+  // 获取每个桶的第一个 load_avg
+  const firstLoadAvgs = new Map();
+  const loadAvgData = await db.prepare(`
+    SELECT server_id, timestamp, load_avg
+    FROM metrics_history
+    WHERE typeof(timestamp) = 'integer'
+      AND timestamp >= ?
+      AND timestamp < ?
+    ORDER BY server_id, timestamp ASC
+  `).bind(startTime, endTime).all();
+  
+  for (const row of loadAvgData.results) {
+    const bucket = Math.floor((row.timestamp + bucketMs / 2) / bucketMs) * bucketMs;
+    const key = `${row.server_id}_${bucket}`;
+    if (!firstLoadAvgs.has(key)) {
+      firstLoadAvgs.set(key, row.load_avg);
+    }
+  }
+  
+  // 插入聚合数据
+  let aggregated = 0;
+  const insertStmt = await db.prepare(`
     INSERT OR IGNORE INTO metrics_aggregated (
       server_id, bucket, bucket_size,
       cpu_avg, cpu_max,
@@ -259,33 +381,32 @@ async function aggregateFromRaw(db, startTime, endTime, bucketSeconds, phaseName
       ram_total_avg, ram_used_avg,
       swap_total_avg, swap_used_avg,
       disk_total_avg, disk_used_avg
-    )
-    SELECT 
-      server_id,
-      CAST((timestamp + ? / 2) / ? AS INTEGER) * ? AS bucket,
-      ? AS bucket_size,
-      ROUND(AVG(cpu), 2), MAX(cpu),
-      ROUND(AVG(ram), 2), MAX(ram),
-      ROUND(AVG(disk), 2), MAX(disk),
-      ROUND(AVG(CAST(load_avg AS REAL)), 2),
-      ROUND(AVG(net_in_speed), 2), ROUND(AVG(net_out_speed), 2),
-      ROUND(AVG(net_rx), 2), ROUND(AVG(net_tx), 2),
-      ROUND(AVG(processes), 2), ROUND(AVG(tcp_conn), 2), ROUND(AVG(udp_conn), 2),
-      ROUND(AVG(ping_ct), 2), ROUND(AVG(ping_cu), 2), ROUND(AVG(ping_cm), 2), ROUND(AVG(ping_bd), 2),
-      ROUND(AVG(ram_total), 2), ROUND(AVG(ram_used), 2),
-      ROUND(AVG(swap_total), 2), ROUND(AVG(swap_used), 2),
-      ROUND(AVG(disk_total), 2), ROUND(AVG(disk_used), 2)
-    FROM metrics_history
-    WHERE typeof(timestamp) = 'integer'
-      AND timestamp >= ?
-      AND timestamp < ?
-    GROUP BY server_id, CAST((timestamp + ? / 2) / ? AS INTEGER)
-  `).bind(
-    bucketMs, bucketMs, bucketMs, bucketSeconds,
-    startTime, endTime, bucketMs, bucketMs
-  ).run();
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
   
-  const aggregated = aggregateResult.meta.changes || 0;
+  for (const row of aggData.results) {
+    const key = `${row.server_id}_${row.bucket}`;
+    const loadAvg = firstLoadAvgs.get(key) || '0 0 0';
+    
+    const result = await insertStmt.bind(
+      row.server_id,
+      row.bucket,
+      bucketSeconds,
+      row.cpu_avg, row.cpu_max,
+      row.ram_avg, row.ram_max,
+      row.disk_avg, row.disk_max,
+      loadAvg,
+      row.net_in_speed_avg, row.net_out_speed_avg,
+      row.net_rx_avg, row.net_tx_avg,
+      row.processes_avg, row.tcp_conn_avg, row.udp_conn_avg,
+      row.ping_ct_avg, row.ping_cu_avg, row.ping_cm_avg, row.ping_bd_avg,
+      row.ram_total_avg, row.ram_used_avg,
+      row.swap_total_avg, row.swap_used_avg,
+      row.disk_total_avg, row.disk_used_avg
+    ).run();
+    
+    aggregated += result.meta.changes || 0;
+  }
   
   const existingAggResult = await db.prepare(`
     SELECT server_id, bucket FROM metrics_aggregated
@@ -361,7 +482,54 @@ async function aggregateFromAggregated(db, startTime, endTime, targetBucketSecon
     return { aggregated: 0, deleted: 0, rawCount: 0 };
   }
   
-  const aggregateResult = await db.prepare(`
+  // 先获取聚合数据（不含 load_avg）
+  const aggData = await db.prepare(`
+    SELECT 
+      server_id,
+      CAST((bucket + ? / 2) / ? AS INTEGER) * ? AS bucket,
+      ROUND(AVG(cpu_avg), 2) AS cpu_avg, MAX(cpu_max) AS cpu_max,
+      ROUND(AVG(ram_avg), 2) AS ram_avg, MAX(ram_max) AS ram_max,
+      ROUND(AVG(disk_avg), 2) AS disk_avg, MAX(disk_max) AS disk_max,
+      ROUND(AVG(net_in_speed_avg), 2) AS net_in_speed_avg, ROUND(AVG(net_out_speed_avg), 2) AS net_out_speed_avg,
+      ROUND(AVG(net_rx_avg), 2) AS net_rx_avg, ROUND(AVG(net_tx_avg), 2) AS net_tx_avg,
+      ROUND(AVG(processes_avg), 2) AS processes_avg, ROUND(AVG(tcp_conn_avg), 2) AS tcp_conn_avg, ROUND(AVG(udp_conn_avg), 2) AS udp_conn_avg,
+      ROUND(AVG(ping_ct_avg), 2) AS ping_ct_avg, ROUND(AVG(ping_cu_avg), 2) AS ping_cu_avg, ROUND(AVG(ping_cm_avg), 2) AS ping_cm_avg, ROUND(AVG(ping_bd_avg), 2) AS ping_bd_avg,
+      ROUND(AVG(ram_total_avg), 2) AS ram_total_avg, ROUND(AVG(ram_used_avg), 2) AS ram_used_avg,
+      ROUND(AVG(swap_total_avg), 2) AS swap_total_avg, ROUND(AVG(swap_used_avg), 2) AS swap_used_avg,
+      ROUND(AVG(disk_total_avg), 2) AS disk_total_avg, ROUND(AVG(disk_used_avg), 2) AS disk_used_avg
+    FROM metrics_aggregated
+    WHERE bucket_size = ?
+      AND bucket >= ?
+      AND bucket < ?
+    GROUP BY server_id, CAST((bucket + ? / 2) / ? AS INTEGER)
+  `).bind(
+    targetBucketMs, targetBucketMs, targetBucketMs,
+    sourceBucketSeconds, startTime, endTime,
+    targetBucketMs, targetBucketMs
+  ).all();
+  
+  // 获取每个桶的第一个 load_avg_avg
+  const firstLoadAvgs = new Map();
+  const loadAvgData = await db.prepare(`
+    SELECT server_id, bucket, load_avg_avg
+    FROM metrics_aggregated
+    WHERE bucket_size = ?
+      AND bucket >= ?
+      AND bucket < ?
+    ORDER BY server_id, bucket ASC
+  `).bind(sourceBucketSeconds, startTime, endTime).all();
+  
+  for (const row of loadAvgData.results) {
+    const bucket = Math.floor((row.bucket + targetBucketMs / 2) / targetBucketMs) * targetBucketMs;
+    const key = `${row.server_id}_${bucket}`;
+    if (!firstLoadAvgs.has(key)) {
+      firstLoadAvgs.set(key, row.load_avg_avg);
+    }
+  }
+  
+  // 插入聚合数据
+  let aggregated = 0;
+  const insertStmt = await db.prepare(`
     INSERT OR IGNORE INTO metrics_aggregated (
       server_id, bucket, bucket_size,
       cpu_avg, cpu_max,
@@ -375,33 +543,32 @@ async function aggregateFromAggregated(db, startTime, endTime, targetBucketSecon
       ram_total_avg, ram_used_avg,
       swap_total_avg, swap_used_avg,
       disk_total_avg, disk_used_avg
-    )
-    SELECT 
-      server_id,
-      CAST((bucket + ? / 2) / ? AS INTEGER) * ? AS bucket,
-      ? AS bucket_size,
-      ROUND(AVG(cpu_avg), 2), MAX(cpu_max),
-      ROUND(AVG(ram_avg), 2), MAX(ram_max),
-      ROUND(AVG(disk_avg), 2), MAX(disk_max),
-      ROUND(AVG(load_avg_avg), 2),
-      ROUND(AVG(net_in_speed_avg), 2), ROUND(AVG(net_out_speed_avg), 2),
-      ROUND(AVG(net_rx_avg), 2), ROUND(AVG(net_tx_avg), 2),
-      ROUND(AVG(processes_avg), 2), ROUND(AVG(tcp_conn_avg), 2), ROUND(AVG(udp_conn_avg), 2),
-      ROUND(AVG(ping_ct_avg), 2), ROUND(AVG(ping_cu_avg), 2), ROUND(AVG(ping_cm_avg), 2), ROUND(AVG(ping_bd_avg), 2),
-      ROUND(AVG(ram_total_avg), 2), ROUND(AVG(ram_used_avg), 2),
-      ROUND(AVG(swap_total_avg), 2), ROUND(AVG(swap_used_avg), 2),
-      ROUND(AVG(disk_total_avg), 2), ROUND(AVG(disk_used_avg), 2)
-    FROM metrics_aggregated
-    WHERE bucket_size = ?
-      AND bucket >= ?
-      AND bucket < ?
-    GROUP BY server_id, CAST((bucket + ? / 2) / ? AS INTEGER)
-  `).bind(
-    targetBucketMs, targetBucketMs, targetBucketMs, targetBucketSeconds,
-    sourceBucketSeconds, startTime, endTime, targetBucketMs, targetBucketMs
-  ).run();
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
   
-  const aggregated = aggregateResult.meta.changes || 0;
+  for (const row of aggData.results) {
+    const key = `${row.server_id}_${row.bucket}`;
+    const loadAvg = firstLoadAvgs.get(key) || '0 0 0';
+    
+    const result = await insertStmt.bind(
+      row.server_id,
+      row.bucket,
+      targetBucketSeconds,
+      row.cpu_avg, row.cpu_max,
+      row.ram_avg, row.ram_max,
+      row.disk_avg, row.disk_max,
+      loadAvg,
+      row.net_in_speed_avg, row.net_out_speed_avg,
+      row.net_rx_avg, row.net_tx_avg,
+      row.processes_avg, row.tcp_conn_avg, row.udp_conn_avg,
+      row.ping_ct_avg, row.ping_cu_avg, row.ping_cm_avg, row.ping_bd_avg,
+      row.ram_total_avg, row.ram_used_avg,
+      row.swap_total_avg, row.swap_used_avg,
+      row.disk_total_avg, row.disk_used_avg
+    ).run();
+    
+    aggregated += result.meta.changes || 0;
+  }
   
   const existingTargetResult = await db.prepare(`
     SELECT server_id, bucket FROM metrics_aggregated

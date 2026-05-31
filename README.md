@@ -140,7 +140,7 @@ CF-Server-Monitor/
 | `API_USER_NAME`  | 自定义用户名（如 `admin`）         | 管理后台用户名           |
 | `API_SECRET`     | 自定义密码（如 `MyMonitor2024!`） | 探针认证密钥 & 管理后台密码   |
 | `D1_DATABASE_ID` | 第二步获取的 Database ID        | D1 数据库 ID         |
-| `LONG_RETENTION` | `true` 或 `false`（可选，默认 false） | 是否启用24小时长期数据保留 |
+| `LONG_RETENTION` | `true` 或 `false`（可选，默认 false） | 启用24小时数据保留，默认1小时 |
 
 ### 第五步：部署
 

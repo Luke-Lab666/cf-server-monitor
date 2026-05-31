@@ -10,8 +10,8 @@
 
 1. **生成模拟数据 SQL**
    ```bash
-   cd test
-   node generate-sql.js
+   # 在项目根目录
+   node test/generate-sql.js
    ```
 
 2. **初始化数据库结构**

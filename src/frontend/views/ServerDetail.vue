@@ -106,6 +106,23 @@
         <div class="chart-card-header">
           <span class="chart-title">
             <span class="chart-title-icon">▸</span>
+            {{ trans.loadAvgMonitor }}
+          </span>
+          <div style="display: flex; gap: 20px; font-size: 11px; font-weight: 500;">
+            <span style="color: var(--accent-green);">{{ trans.load1m }} <b>{{ (parseLoadAvg(server.load_avg)[0] || 0).toFixed(2) }}</b></span>
+            <span style="color: var(--accent-yellow);">{{ trans.load5m }} <b>{{ (parseLoadAvg(server.load_avg)[1] || 0).toFixed(2) }}</b></span>
+            <span style="color: var(--accent-blue);">{{ trans.load15m }} <b>{{ (parseLoadAvg(server.load_avg)[2] || 0).toFixed(2) }}</b></span>
+          </div>
+        </div>
+        <div class="chart-body">
+          <canvas ref="loadChartRef"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-card-header">
+          <span class="chart-title">
+            <span class="chart-title-icon">▸</span>
             {{ trans.memoryUsage }}
           </span>
           <div>
@@ -179,7 +196,7 @@
         </div>
       </div>
 
-      <div class="chart-card full-width">
+      <div class="chart-card">
         <div class="chart-card-header">
           <span class="chart-title">
             <span class="chart-title-icon">▸</span>
@@ -281,9 +298,19 @@ const netChartRef = ref(null)
 const procChartRef = ref(null)
 const connChartRef = ref(null)
 const pingChartRef = ref(null)
+const loadChartRef = ref(null)
 const historyLoaded = ref(false)
 
 const charts = {}
+
+const parseLoadAvg = (loadAvgStr) => {
+  if (!loadAvgStr) return [0, 0, 0]
+  const parts = String(loadAvgStr).trim().split(/\s+/)
+  const load1 = parseFloat(parts[0]) || 0
+  const load5 = parseFloat(parts[1]) || 0
+  const load15 = parseFloat(parts[2]) || 0
+  return [load1, load5, load15]
+}
 
 const initCharts = () => {
   Chart.defaults.font.family = "'JetBrains Mono', 'Courier New', monospace"
@@ -303,7 +330,7 @@ const initCharts = () => {
     responsive: true,
     maintainAspectRatio: false,
     animation: { duration: 300, easing: 'easeOutCubic' },
-    interaction: { mode: 'nearest', intersect: false },
+    interaction: { mode: 'index', intersect: false },
     plugins: {
       legend: {
         display: showLegend,
@@ -464,6 +491,20 @@ const initCharts = () => {
       options: createChartOptions(' ms', true, 'Latency')
     })
   }
+
+  if (loadChartRef.value) {
+    charts.load = new Chart(loadChartRef.value.getContext('2d'), {
+      type: 'line',
+      data: {
+        datasets: [
+          { label: trans.value.load1m || '1 Min', data: [], borderColor: '#00d4aa', backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.5, pointRadius: 0, hoverRadius: 5 },
+          { label: trans.value.load5m || '5 Min', data: [], borderColor: '#ffb870', backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.5, pointRadius: 0, hoverRadius: 5 },
+          { label: trans.value.load15m || '15 Min', data: [], borderColor: '#4da6ff', backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.5, pointRadius: 0, hoverRadius: 5 }
+        ]
+      },
+      options: createChartOptions('', true, 'Load')
+    })
+  }
 }
 
 const updateChartDataset = (chart, datasetIndex, dataPoints, xField = 'timestamp', yField) => {
@@ -534,6 +575,53 @@ const updateChartDatasetWithSwap = (chart, datasetIndex, dataPoints) => {
   completeData.push(...processedData)
 
   dataset.data = completeData.filter(d => d.x >= startTime)
+}
+
+const updateLoadChart = (chart, dataPoints) => {
+  if (!chart || !dataPoints || dataPoints.length === 0) return
+
+  const startTime = Date.now() - currentHours.value * 60 * 60 * 1000
+
+  let sampledData = dataPoints
+  if (dataPoints.length > 500) {
+    const step = Math.ceil(dataPoints.length / 500)
+    sampledData = dataPoints.filter((_, i) => i % step === 0)
+  }
+
+  const processedData = sampledData.map(d => {
+    // 优先使用 load_avg，如果没有则尝试 load_avg_avg（聚合数据）
+    const loadVal = d.load_avg || d.load_avg_avg || '0 0 0'
+    const loads = parseLoadAvg(loadVal)
+    return { 
+      x: new Date(d.timestamp).getTime(), 
+      load1: loads[0],
+      load5: loads[1],
+      load15: loads[2]
+    }
+  })
+
+  processedData.sort((a, b) => a.x - b.x)
+
+  const completeData1 = []
+  const completeData5 = []
+  const completeData15 = []
+  
+  if (processedData.length > 0 && processedData[0].x > startTime) {
+    completeData1.push({ x: startTime, y: null })
+    completeData5.push({ x: startTime, y: null })
+    completeData15.push({ x: startTime, y: null })
+  }
+  
+  processedData.forEach(d => {
+    completeData1.push({ x: d.x, y: d.load1 })
+    completeData5.push({ x: d.x, y: d.load5 })
+    completeData15.push({ x: d.x, y: d.load15 })
+  })
+
+  chart.data.datasets[0].data = completeData1.filter(d => d.x >= startTime)
+  chart.data.datasets[1].data = completeData5.filter(d => d.x >= startTime)
+  chart.data.datasets[2].data = completeData15.filter(d => d.x >= startTime)
+  chart.update('none')
 }
 
 const mergeDataSets = (rawData, aggData) => {
@@ -627,6 +715,7 @@ const loadAllHistory = async (hours) => {
     updateChartDataset(charts.ping, 1, allData, 'timestamp', 'ping_cu')
     updateChartDataset(charts.ping, 2, allData, 'timestamp', 'ping_cm')
     updateChartDataset(charts.ping, 3, allData, 'timestamp', 'ping_bd')
+    updateLoadChart(charts.load, allData)
 
     updateAllChartTimeUnits(hours)
     historyLoaded.value = true
@@ -697,6 +786,22 @@ const fetchCurrentStatus = async () => {
     appendDataToChart(charts.ping, 1, dataTimestamp, data.ping_cu)
     appendDataToChart(charts.ping, 2, dataTimestamp, data.ping_cm)
     appendDataToChart(charts.ping, 3, dataTimestamp, data.ping_bd)
+    // 追加负载数据
+    if (charts.load) {
+      const loads = parseLoadAvg(data.load_avg)
+      const time = new Date(dataTimestamp).getTime()
+      const cutoffTime = Date.now() - currentHours.value * 60 * 60 * 1000
+      
+      charts.load.data.datasets[0].data.push({ x: time, y: loads[0] })
+      charts.load.data.datasets[1].data.push({ x: time, y: loads[1] })
+      charts.load.data.datasets[2].data.push({ x: time, y: loads[2] })
+      
+      charts.load.data.datasets[0].data = charts.load.data.datasets[0].data.filter(d => d.x >= cutoffTime)
+      charts.load.data.datasets[1].data = charts.load.data.datasets[1].data.filter(d => d.x >= cutoffTime)
+      charts.load.data.datasets[2].data = charts.load.data.datasets[2].data.filter(d => d.x >= cutoffTime)
+      
+      charts.load.update('none')
+    }
 
     lastUpdateText.value = new Date().toLocaleTimeString()
   } catch (e) {
@@ -731,10 +836,10 @@ const init = async () => {
   await new Promise(resolve => setTimeout(resolve, 50))
 
   // 检查所有 canvas ref 是否存在
-  if (cpuChartRef.value && ramChartRef.value && diskChartRef.value &&
-      netChartRef.value && procChartRef.value && connChartRef.value && pingChartRef.value) {
-    initCharts()
-  }
+    if (cpuChartRef.value && ramChartRef.value && diskChartRef.value &&
+        netChartRef.value && procChartRef.value && connChartRef.value && pingChartRef.value && loadChartRef.value) {
+      initCharts()
+    }
   fetchCurrentStatus()
   loadAllHistory(currentHours.value)
   statusTimer = setInterval(fetchCurrentStatus, 60000)
