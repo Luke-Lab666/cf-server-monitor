@@ -128,18 +128,6 @@ export async function checkOfflineNodes(db) {
 
   if (siteSettings.tg_notify !== 'true'|| !siteSettings.tg_bot_token) return;
 
-  const skipCount = parseInt(siteSettings.cleanup_skip_count || '0', 10) || 0;
-  debug(`[Cron] 检测到当前跳过次数: ${skipCount}`);
-  if (skipCount > 0) {
-    debug(`[Cron] 检测到表轮换进行中，跳过离线检测（剩余跳过次数: ${6 - skipCount}）`);
-    
-    const newCount = skipCount + 1;
-    const finalCount = newCount > 5 ? 0 : newCount;
-    
-    await saveSiteOptions(db, { cleanup_skip_count: String(finalCount) });
-    return;
-  }
-
   try {
     const allServers = await getAllServers(db);
     

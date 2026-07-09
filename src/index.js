@@ -332,16 +332,21 @@ export default {
   async scheduled(event, env, ctx) {
     const cron = event.cron;
     debug(`[Cron] 定时任务触发: ${cron}`);
+
+    const now = new Date();
+    const day = now.getUTCDay();
+    const hour = now.getUTCHours();
+    const minute = now.getUTCMinutes();
     
     if (cron === '*/1 * * * *') {
-      debug('[Cron] 开始执行离线节点检测');
-      await checkOfflineNodes(env.DB);
-      debug('[Cron] 离线节点检测完成');
+      if (day === 0 && hour === 0 && minute < 5) {
+        debug('[Cron] 每周日0:00-0:05表轮换期间，跳过离线节点检测');
+      } else {
+        debug('[Cron] 开始执行离线节点检测');
+        await checkOfflineNodes(env.DB);
+        debug('[Cron] 离线节点检测完成');
+      }
     } else if (cron === '0 * * * *') {
-      const now = new Date();
-      const day = now.getUTCDay();
-      const hour = now.getUTCHours();
-      
       if (day === 0 && hour === 0) {
         debug('[Cron] 开始执行每周数据清理任务（表轮换）');
         await weeklyCleanup(env.DB);

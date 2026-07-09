@@ -314,9 +314,6 @@ export async function weeklyCleanup(db) {
   try {
     debug('[Cleanup] 开始执行表轮换操作...');
     
-    await saveSiteOptions(db, { cleanup_skip_count: '1' });
-    debug('cleanup_skip_count set to 1');
-
     // 判断metrics_history有无索引
     const index = await db.prepare(
       `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='metrics_history'`
